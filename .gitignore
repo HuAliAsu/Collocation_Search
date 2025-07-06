@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+# اگر از محیط مجازی به نام venv استفاده می‌کنید
+venv/
+
+# Generated data files (مهم‌ترین بخش)
+# به گیت می‌گوید که این فایل را هرگز دنبال نکند
+*.pkl
+
+# OS-specific files
+.DS_Store
+Thumbs.db
