@@ -11,11 +11,7 @@ from pathlib import Path
 import re
 import docx
 
-
-# ==============================================================================
-# بخش توابع پردازش متن (ادغام شده از text_processing.py)
-# ==============================================================================
-
+# بخش توابع پردازش متن (text_processing.py)
 def get_text_from_docx(file_path: Path) -> str | None:
     """متن را از یک فایل .docx استخراج می‌کند."""
     try:
@@ -39,7 +35,6 @@ def load_correction_list(file_path: Path | None) -> dict:
             correction_dict.update(dict(zip(df_sheet['incorrect'].astype(str), df_sheet['correct'].astype(str))))
         return correction_dict
     except Exception:
-        # مدیریت خطا
         return {}
 
 
@@ -120,11 +115,8 @@ def process_paragraphs(paragraphs: list[str], normalizer, max_words: int, ideal_
 
     return final_segments
 
-
 # ==============================================================================
 # کلاس اصلی برنامه
-# ==============================================================================
-
 class TextAnalyzerApp:
     def __init__(self, root):
         self.root = root
@@ -188,43 +180,40 @@ class TextAnalyzerApp:
         self.search_type_combo.pack(side=tk.RIGHT, padx=(0, 5), pady=5)
         self.search_type_combo.bind("<<ComboboxSelected>>", self._on_search_type_change)
 
-        self.keyword_entry = ttk.Entry(search_controls_main_frame, justify='right', width=40)
-        self.keyword_entry.pack(side=tk.RIGHT, padx=(5, 5), pady=5, fill=tk.X, expand=True)
-
-        self.collocation_tools_labelframe = ttk.LabelFrame(search_controls_main_frame, text="ابزارهای جستجوی مجاور",
-                                                           padding="3")
-        self.collocation_tools_labelframe.columnconfigure(1, weight=1)
-        self.collocation_tools_labelframe.columnconfigure(3, weight=1)
-        self.collocation_tools_labelframe.columnconfigure(5, weight=1)
-        ttk.Label(self.collocation_tools_labelframe, text="حالت:").grid(row=0, column=0, padx=(0, 1), pady=1,
+        self.collocation_tools_frame = ttk.Frame(search_controls_main_frame, padding="3", relief="groove", borderwidth=1)
+        self.collocation_tools_frame.columnconfigure(1, weight=1)
+        self.collocation_tools_frame.columnconfigure(3, weight=1)
+        self.collocation_tools_frame.columnconfigure(5, weight=1)
+        ttk.Label(self.collocation_tools_frame, text="حالت:").grid(row=0, column=0, padx=(0, 1), pady=1,
                                                                         sticky=tk.E)
         self.mode_var = tk.StringVar(value="هر دو")
-        self.mode_combo = ttk.Combobox(self.collocation_tools_labelframe, textvariable=self.mode_var,
+        self.mode_combo = ttk.Combobox(self.collocation_tools_frame, textvariable=self.mode_var,
                                        values=["هر دو", "کلمه قبلی", "کلمه بعدی"], state="readonly", width=8,
                                        justify='right')
         self.mode_combo.grid(row=0, column=1, padx=(0, 2), pady=1, sticky=tk.EW)
-        ttk.Label(self.collocation_tools_labelframe, text="شرط:").grid(row=0, column=2, padx=(2, 1), pady=1,
+        ttk.Label(self.collocation_tools_frame, text="شرط:").grid(row=0, column=2, padx=(2, 1), pady=1,
                                                                        sticky=tk.E)
         self.condition_var = tk.StringVar(value="فرقی نمی‌کند")
-        self.condition_combo = ttk.Combobox(self.collocation_tools_labelframe, textvariable=self.condition_var,
+        self.condition_combo = ttk.Combobox(self.collocation_tools_frame, textvariable=self.condition_var,
                                             values=["فرقی نمی‌کند", "حاوی", "شروع با"], state="readonly", width=10,
                                             justify='right')
         self.condition_combo.grid(row=0, column=3, padx=(0, 2), pady=1, sticky=tk.EW)
         self.condition_combo.bind("<<ComboboxSelected>>", self._toggle_condition_entry)
-        self.condition_entry = ttk.Entry(self.collocation_tools_labelframe, width=10, justify='right')
+        self.condition_entry = ttk.Entry(self.collocation_tools_frame, width=10, justify='right')
         self.condition_entry.grid(row=0, column=4, padx=(0, 2), pady=1, sticky=tk.EW)
-        ttk.Label(self.collocation_tools_labelframe, text="نقش:").grid(row=0, column=5, padx=(2, 1), pady=1,
+        ttk.Label(self.collocation_tools_frame, text="نقش:").grid(row=0, column=5, padx=(2, 1), pady=1,
                                                                        sticky=tk.E)
         self.pos_var = tk.StringVar(value="هر نقشی")
         pos_options = ["هر نقشی"] + list(self.pos_map.keys())
-        self.pos_combo = ttk.Combobox(self.collocation_tools_labelframe, textvariable=self.pos_var, values=pos_options,
+        self.pos_combo = ttk.Combobox(self.collocation_tools_frame, textvariable=self.pos_var, values=pos_options,
                                       state="readonly", width=10, justify='right')
         self.pos_combo.grid(row=0, column=6, padx=(0, 1), pady=1, sticky=tk.EW)
 
         self.search_button = ttk.Button(search_controls_main_frame, text="جستجو", command=self._start_search,
                                         state=tk.DISABLED)
-        self.search_button.pack(side=tk.LEFT, padx=(5, 0), pady=5, ipady=2)
-
+        self.search_button.pack(side=tk.RIGHT, padx=(2, 5), pady=5, ipady=2)  # توجه: side به RIGHT تغییر کرد
+        self.keyword_entry = ttk.Entry(search_controls_main_frame, justify='right', width=40)
+        self.keyword_entry.pack(side=tk.RIGHT, padx=(5, 5), pady=5, fill=tk.X, expand=True)
         # *** FIXED ***: بازگرداندن منوی کشویی مدل‌های هایلایت
         highlight_model_choices = ["بدون هایلایت", "مدل ۱ (عادی)", "مدل ۲ (معکوس کامل)", "مدل ۳ (جفت آخر عادی)",
                                    "مدل ۴ (جفت اول عادی)"]
@@ -298,7 +287,7 @@ class TextAnalyzerApp:
 
         font_menu = tk.Menu(menubar, tearoff=0)
         font_families = ["Tahoma", "Arial", "Times New Roman", "Courier New", "Dubai"]
-        font_sizes = [9, 10, 11, 12, 13, 14, 16]
+        font_sizes = [9, 10, 11, 12, 13, 14, 16, 18, 20, 22]
         self.selected_font_family = tk.StringVar(value="Dubai")
         self.selected_font_size = tk.IntVar(value=13)
         self.selected_rowheight = tk.IntVar(value=40)
@@ -334,10 +323,10 @@ class TextAnalyzerApp:
     def _on_search_type_change(self, event=None):
         search_type = self.search_type_var.get()
         if search_type == "کلمات مجاور":
-            self.collocation_tools_labelframe.pack(side=tk.RIGHT, before=self.keyword_entry, padx=(5, 5), pady=5,
+            self.collocation_tools_frame.pack(side=tk.RIGHT, before=self.keyword_entry, padx=(5, 5), pady=5,
                                                    fill=tk.NONE, expand=False)
         else:
-            self.collocation_tools_labelframe.pack_forget()
+            self.collocation_tools_frame.pack_forget()
 
     def _show_help(self):
         try:
@@ -498,8 +487,7 @@ class TextAnalyzerApp:
 
             sentence_to_display = original_sentence
             if highlight_model != "بدون هایلایت" and self.current_found_word:
-                sentence_to_display = self._reorder_text_for_bidi_fix(original_sentence, self.current_found_word,
-                                                                      highlight_model)
+                sentence_to_display = self._reorder_text_for_bidi_fix(original_sentence, self.current_found_word, highlight_model)
 
             self.source_text.insert(tk.END, sentence_to_display, "rtl_align")
 
