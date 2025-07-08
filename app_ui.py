@@ -7,29 +7,26 @@ from collections import Counter, defaultdict
 from hazm import Normalizer, word_tokenize, POSTagger
 import traceback
 import pickle
-# import docx # دیگر مستقیما اینجا نیاز نیست، به text_processing منتقل شد
-# import re # دیگر مستقیما اینجا نیاز نیست، به text_processing منتقل شد
 from pathlib import Path
-import math
-import text_processing # ماژول جدید ما
+import text_processing
 
 
 class TextAnalyzerApp:
-    # --- بخش ۱: مقداردهی اولیه و پارامترها ---
     def __init__(self, root):
         self.root = root
-        self.root.title("ابزار یکپارچه تحلیل متن")
+        self.base_title = "ابزار یکپارچه تحلیل متن"
+        self.root.title(self.base_title)
         self.root.geometry("1200x800")
         try:
             self.root.state('zoomed')
         except tk.TclError:
             pass
-        self.MAX_WORDS, self.IDEAL_WORDS = 250, 150 # اینها در کلاس اصلی باقی میمانند و به توابع پاس داده میشوند
+        self.MAX_WORDS, self.IDEAL_WORDS = 250, 150
         self.tagged_data, self.sentence_mapping, self.last_search_phrase = [], defaultdict(list), ""
+        self.direct_phrase_sources = defaultdict(list)
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.cache_path = os.path.join(self.script_dir, 'preprocessed_data.pkl')
         try:
-            # هزپ برای نرمالایزر و تگر در کلاس اصلی باقی میماند
             model_path = os.path.join(self.script_dir, 'pos_tagger.model')
             if not os.path.exists(model_path):
                 messagebox.showerror("فایل مدل یافت نشد", f"فایل 'pos_tagger.model' یافت نشد.")
@@ -47,13 +44,12 @@ class TextAnalyzerApp:
             "حرف اضافه": {"ADP", "ADP,EZ"}, "حرف ربط": {"CCONJ", "SCONJ"},
             "نقطه‌گذاری": {"PUNCT"}, "تعیین‌کننده": {"DET"}, "حرف ندا": {"INTJ"}
         }
-        self.highlight_enabled_var = tk.BooleanVar(value=True) # متغیر کنترل هایلایت
-        self.current_found_word = None # برای نگهداری آخرین کلمه مجاور هایلایت شده
-        self.current_source_sentences_for_export = [] # برای نگهداری جملات منبع جهت اکسپورت
+        self.highlight_enabled_var = tk.BooleanVar(value=True)
+        self.current_found_word = None
+        self.current_source_sentences_for_export = []
         self._create_widgets()
         self.root.after(100, self._initiate_loading_process)
 
-    # --- بخش ۲: ایجاد رابط کاربری (با تغییر) ---
     def _create_widgets(self):
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -61,59 +57,71 @@ class TextAnalyzerApp:
         style.configure("Treeview.Heading", font=('Tahoma', 10, 'bold'), anchor='center')
         style.configure("Treeview", rowheight=25, font=('Tahoma', 9))
         style.configure("Custom.Treeview", background="#cccccc", fieldbackground="#cccccc", foreground="black")
-        
-        # فریم برای دکمه‌های بالا (پردازش مجدد و هایلایت)
-        top_buttons_frame = ttk.Frame(main_frame)
-        top_buttons_frame.pack(fill=tk.X, pady=(0,5), side=tk.TOP) # تغییر pady
 
-        reprocess_button = ttk.Button(top_buttons_frame, text="پردازش مجدد داده‌ها", command=self._force_reprocess)
-        reprocess_button.pack(side=tk.RIGHT, padx=(10,0), pady=5, ipady=5) # تغییر padx
+        search_controls_main_frame = ttk.Frame(main_frame, padding="5")
+        search_controls_main_frame.pack(fill=tk.X, side=tk.TOP, pady=5)
 
-        self.highlight_toggle_button = ttk.Checkbutton(top_buttons_frame, text="هایلایت", # تغییر متن دکمه
-                                                       variable=self.highlight_enabled_var,
-                                                       command=self._toggle_highlighting_status)
-        self.highlight_toggle_button.pack(side=tk.RIGHT, padx=10, pady=5)
+        self.search_type_var = tk.StringVar(value="کلمات مجاور")
+        search_type_choices = ["کلمات مجاور", "عین عبارت کلیدی"]
+        self.search_type_combo = ttk.Combobox(search_controls_main_frame, textvariable=self.search_type_var,
+                                              values=search_type_choices, state="readonly", width=15, justify='right')
+        ttk.Label(search_controls_main_frame, text=":نوع جستجو").pack(side=tk.RIGHT, padx=(2, 0), pady=5)
+        self.search_type_combo.pack(side=tk.RIGHT, padx=(0, 5), pady=5)
+        self.search_type_combo.bind("<<ComboboxSelected>>", self._on_search_type_change)
 
-        # فریم برای ورودی‌های جستجو
-        input_controls_frame = ttk.Frame(main_frame) # تغییر نام از top_frame به input_controls_frame
-        input_controls_frame.pack(fill=tk.X, pady=5, side=tk.TOP)
-        
-        input_frame = ttk.Frame(input_controls_frame, padding="5") # این فریم داخل input_controls_frame قرار میگیرد
-        input_frame.pack(fill=tk.X, side=tk.LEFT, expand=True)
-        
-        ttk.Label(input_frame, text="عبارت کلیدی:").grid(row=0, column=0, padx=(0, 2), pady=5, sticky=tk.W)
-        self.keyword_entry = ttk.Entry(input_frame, justify='right')
-        self.keyword_entry.grid(row=0, column=1, padx=(0, 5), pady=5, sticky=tk.EW)
-        ttk.Label(input_frame, text="حالت:").grid(row=0, column=2, padx=(5, 2), pady=5, sticky=tk.W)
+        self.keyword_entry = ttk.Entry(search_controls_main_frame, justify='right', width=40)
+        self.keyword_entry.pack(side=tk.RIGHT, padx=(5, 5), pady=5, fill=tk.X, expand=True)
+
+        self.collocation_tools_labelframe = ttk.LabelFrame(search_controls_main_frame, text="ابزارهای جستجوی مجاور",
+                                                           padding="3")
+        self.collocation_tools_labelframe.columnconfigure(1, weight=1)
+        self.collocation_tools_labelframe.columnconfigure(3, weight=1)
+        self.collocation_tools_labelframe.columnconfigure(5, weight=1)
+        ttk.Label(self.collocation_tools_labelframe, text="حالت:").grid(row=0, column=0, padx=(0, 1), pady=1,
+                                                                        sticky=tk.E)
         self.mode_var = tk.StringVar(value="هر دو")
-        self.mode_combo = ttk.Combobox(input_frame, textvariable=self.mode_var,
-                                       values=["هر دو", "کلمه قبلی", "کلمه بعدی"], state="readonly", width=10,
+        self.mode_combo = ttk.Combobox(self.collocation_tools_labelframe, textvariable=self.mode_var,
+                                       values=["هر دو", "کلمه قبلی", "کلمه بعدی"], state="readonly", width=8,
                                        justify='right')
-        self.mode_combo.grid(row=0, column=3, padx=(0, 5), pady=5, sticky=tk.W)
-        ttk.Label(input_frame, text="شرط کلمه:").grid(row=0, column=4, padx=(5, 2), pady=5, sticky=tk.W)
+        self.mode_combo.grid(row=0, column=1, padx=(0, 2), pady=1, sticky=tk.EW)
+        ttk.Label(self.collocation_tools_labelframe, text="شرط:").grid(row=0, column=2, padx=(2, 1), pady=1,
+                                                                       sticky=tk.E)
         self.condition_var = tk.StringVar(value="فرقی نمی‌کند")
-        self.condition_combo = ttk.Combobox(input_frame, textvariable=self.condition_var,
-                                            values=["فرقی نمی‌کند", "حاوی", "شروع با"], state="readonly", width=12, # تغییر "کلمه خاص" به "حاوی"
+        self.condition_combo = ttk.Combobox(self.collocation_tools_labelframe, textvariable=self.condition_var,
+                                            values=["فرقی نمی‌کند", "حاوی", "شروع با"], state="readonly", width=10,
                                             justify='right')
-        self.condition_combo.grid(row=0, column=5, padx=(0, 5), pady=5, sticky=tk.W)
+        self.condition_combo.grid(row=0, column=3, padx=(0, 2), pady=1, sticky=tk.EW)
         self.condition_combo.bind("<<ComboboxSelected>>", self._toggle_condition_entry)
-        self.condition_entry = ttk.Entry(input_frame, width=15, justify='right')
-        self.condition_entry.grid(row=0, column=6, padx=(0, 5), pady=5, sticky=tk.W)
-        self.condition_entry.grid_remove()
-        ttk.Label(input_frame, text="نقش دستوری:").grid(row=0, column=7, padx=(5, 2), pady=5, sticky=tk.W)
+        self.condition_entry = ttk.Entry(self.collocation_tools_labelframe, width=10, justify='right')
+        self.condition_entry.grid(row=0, column=4, padx=(0, 2), pady=1, sticky=tk.EW)
+        ttk.Label(self.collocation_tools_labelframe, text="نقش:").grid(row=0, column=5, padx=(2, 1), pady=1,
+                                                                       sticky=tk.E)
         self.pos_var = tk.StringVar(value="هر نقشی")
         pos_options = ["هر نقشی"] + list(self.pos_map.keys())
-        self.pos_combo = ttk.Combobox(input_frame, textvariable=self.pos_var, values=pos_options, state="readonly",
-                                      width=12, justify='right')
-        self.pos_combo.grid(row=0, column=8, padx=(0, 10), pady=5, sticky=tk.W)
-        self.search_button = ttk.Button(input_frame, text="جستجو", command=self._start_search, state=tk.DISABLED)
-        self.search_button.grid(row=0, column=9, padx=5, pady=5, ipady=5)
+        self.pos_combo = ttk.Combobox(self.collocation_tools_labelframe, textvariable=self.pos_var, values=pos_options,
+                                      state="readonly", width=10, justify='right')
+        self.pos_combo.grid(row=0, column=6, padx=(0, 1), pady=1, sticky=tk.EW)
+
+        self.search_button = ttk.Button(search_controls_main_frame, text="جستجو", command=self._start_search,
+                                        state=tk.DISABLED)
+        self.search_button.pack(side=tk.LEFT, padx=(5, 0), pady=5, ipady=2)
+
         self.results_count_var = tk.StringVar(value="")
-        results_count_label = ttk.Label(input_frame, textvariable=self.results_count_var, font=('Tahoma', 9, 'bold'))
-        results_count_label.grid(row=0, column=10, padx=(10, 5), pady=5, sticky=tk.W)
-        input_frame.columnconfigure(1, weight=1)
-        self.keyword_entry.bind('<Return>', lambda event: print("Enter on keyword_entry") or self._start_search())
-        self.condition_entry.bind('<Return>', lambda event: print("Enter on condition_entry") or self._start_search())
+
+        self.highlight_options_var = tk.StringVar(value="کلمه یافت شده")
+        highlight_choices = ["بدون هایلایت", "کلمه یافت شده", "کلمه یافت شده EN"]
+        self.highlight_combo = ttk.Combobox(search_controls_main_frame, textvariable=self.highlight_options_var,
+                                            values=highlight_choices, state="readonly", width=15, justify='right')
+        self.highlight_combo.pack(side=tk.LEFT, padx=(0, 5), pady=5)
+        self.highlight_combo.bind("<<ComboboxSelected>>", self._on_highlight_option_change)
+        ttk.Label(search_controls_main_frame, text=":هایلایت").pack(side=tk.LEFT, padx=(2, 0), pady=5)
+
+        self._on_search_type_change()
+        self._toggle_condition_entry()
+
+        self.keyword_entry.bind('<Return>', lambda event: self._start_search())
+        self.condition_entry.bind('<Return>', lambda event: self._start_search())
+
         output_pane = ttk.PanedWindow(main_frame, orient=tk.VERTICAL)
         output_pane.pack(fill=tk.BOTH, expand=True, pady=5)
         results_frame = tk.Frame(output_pane, bg='#cccccc', width=380, height=200)
@@ -132,6 +140,7 @@ class TextAnalyzerApp:
         self.results_tree.configure(yscroll=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         output_pane.add(results_frame, weight=1)
+
         sentences_frame = ttk.LabelFrame(output_pane, text="جملات منبع")
         sentences_frame.configure(style="Custom.TLabelframe")
         style.configure("Custom.TLabelframe", background="#cccccc")
@@ -140,240 +149,253 @@ class TextAnalyzerApp:
                                                      font=("Tahoma", 11), bg="#cccccc")
         self.source_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         output_pane.add(sentences_frame, weight=2)
+
         self.source_text.tag_configure("rtl_align", justify='right')
-        self.source_text.tag_configure("highlight_phrase", background="#FFD700", relief=tk.RAISED, borderwidth=1)
         self.source_text.tag_configure("highlight_found", background="#ADD8E6", relief=tk.RAISED, borderwidth=1)
-        self.status_var = tk.StringVar(value="آماده برای بارگذاری داده‌ها...");
-        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=5)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        status_bar_frame = ttk.Frame(self.root, relief=tk.SUNKEN, padding=0)
+        status_bar_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_var = tk.StringVar(value="آماده برای بارگذاری داده‌ها...")
+        status_text_label = ttk.Label(status_bar_frame, textvariable=self.status_var, anchor=tk.W)
+        status_text_label.pack(side=tk.LEFT, padx=(5, 0), pady=2)
+        status_results_count_label = ttk.Label(status_bar_frame, textvariable=self.results_count_var, anchor=tk.E,
+                                               font=('Tahoma', 9, 'bold'))
+        status_results_count_label.pack(side=tk.RIGHT, padx=(0, 5), pady=2)
+
         self.progressbar = ttk.Progressbar(self.root, orient='horizontal', mode='determinate')
-        # --- اضافه کردن منو برای تغییر فونت نتایج ---
+
         menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="پردازش مجدد داده‌ها", command=self._force_reprocess)
+        file_menu.add_separator()
+        file_menu.add_command(label="خروجی نتایج به اکسل", command=self._export_results_to_excel)
+        file_menu.add_command(label="خروجی جملات منبع به اکسل", command=self._export_source_sentences_to_excel)
+        menubar.add_cascade(label="فایل", menu=file_menu)
+
         font_menu = tk.Menu(menubar, tearoff=0)
         font_families = ["Tahoma", "Arial", "Times New Roman", "Courier New", "Dubai"]
         font_sizes = [9, 10, 11, 12, 13, 14, 16]
         self.selected_font_family = tk.StringVar(value="Dubai")
         self.selected_font_size = tk.IntVar(value=13)
         self.selected_rowheight = tk.IntVar(value=40)
-        # تابع اصلی تغییر فونت و فاصله خطوط هر دو بخش
+
         def set_treeview_font():
             font_tuple = (self.selected_font_family.get(), self.selected_font_size.get())
             style = ttk.Style(self.root)
             style.configure("Custom.Treeview", font=font_tuple)
             style.configure("Custom.Treeview", rowheight=self.selected_rowheight.get())
+
         set_treeview_font()
         font_family_menu = tk.Menu(font_menu, tearoff=0)
         for family in font_families:
-            font_family_menu.add_radiobutton(label=family, variable=self.selected_font_family, value=family, command=set_treeview_font)
+            font_family_menu.add_radiobutton(label=family, variable=self.selected_font_family, value=family,
+                                             command=set_treeview_font)
         font_menu.add_cascade(label="نوع فونت", menu=font_family_menu)
         font_size_menu = tk.Menu(font_menu, tearoff=0)
         for size in font_sizes:
-            font_size_menu.add_radiobutton(label=str(size), variable=self.selected_font_size, value=size, command=set_treeview_font)
+            font_size_menu.add_radiobutton(label=str(size), variable=self.selected_font_size, value=size,
+                                           command=set_treeview_font)
         font_menu.add_cascade(label="سایز فونت", menu=font_size_menu)
         menubar.add_cascade(label="فونت نتایج", menu=font_menu)
 
-        # --- اضافه کردن منوی خروجی ---
-        export_menu = tk.Menu(menubar, tearoff=0)
-        export_menu.add_command(label="خروجی نتایج به اکسل", command=self._export_results_to_excel)
-        export_menu.add_command(label="خروجی جملات منبع به اکسل", command=self._export_source_sentences_to_excel)
-        menubar.add_cascade(label="خروجی", menu=export_menu)
-        
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="نمایش راهنما", command=self._show_help)
+        menubar.add_cascade(label="راهنما", menu=help_menu)
         self.root.config(menu=menubar)
 
-    # --- بخش ۳: منطق اصلی برنامه (با تغییر کلیدی در on_result_click) ---
+    def _on_highlight_option_change(self, event=None):
+        if self.results_tree.selection():
+            self._apply_or_remove_highlights()
+
+    def _on_search_type_change(self, event=None):
+        search_type = self.search_type_var.get()
+        if search_type == "کلمات مجاور":
+            self.collocation_tools_labelframe.pack(side=tk.RIGHT, before=self.keyword_entry, padx=(5, 5), pady=5,
+                                                   fill=tk.NONE, expand=False)
+        else:
+            self.collocation_tools_labelframe.pack_forget()
+
+    def _show_help(self):
+        try:
+            readme_path = os.path.join(self.script_dir, "README.md")
+            if not os.path.exists(readme_path):
+                messagebox.showerror("خطا", "فایل راهنما (README.md) یافت نشد.")
+                return
+            with open(readme_path, "r", encoding="utf-8") as f:
+                readme_content = f.read()
+            help_window = tk.Toplevel(self.root)
+            help_window.title("راهنمای برنامه")
+            help_window.geometry("800x600")
+            try:
+                help_window.state('zoomed')
+            except tk.TclError:
+                pass
+            text_area = scrolledtext.ScrolledText(help_window, wrap=tk.WORD, font=("Tahoma", 10))
+            text_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+            text_area.insert(tk.END, readme_content)
+            text_area.config(state=tk.DISABLED)
+            text_area.tag_configure("rtl_align_help", justify='right')
+            text_area.tag_add("rtl_align_help", "1.0", tk.END)
+            help_window.transient(self.root)
+            help_window.grab_set()
+            self.root.wait_window(help_window)
+        except Exception as e:
+            messagebox.showerror("خطا در نمایش راهنما", f"خطایی رخ داد: {e}")
 
     def _on_result_click(self, event=None):
-        """
-        تابع بازنویسی شده برای نمایش صحیح پاراگراف‌های RTL و ایجاد لینک به فایل.
-        """
         selected_items = self.results_tree.selection()
         if not selected_items: return
-
         selected_item = selected_items[0]
         values = self.results_tree.item(selected_item, "values")
-        if not values or not values[1]: return
+        item_tags = self.results_tree.item(selected_item, "tags")
+        if not values or not values[1] or values[1] == "هیچ نتیجه‌ای یافت نشد.": return
 
-        _, found_word, _, position = values
-        key = (position, found_word)
-        self.current_found_word = found_word # ذخیره کلمه مجاور فعلی
+        sample_display_text = values[0]
+        term_in_table = values[1]
+        position_type = values[3]
 
-        unique_sources = set(self.sentence_mapping.get(key, [("جمله‌ای یافت نشد.", "")]))
+        self.current_found_word = None
+        sources_to_display = []
 
+        if 'direct_hit' in item_tags:
+            self.current_found_word = term_in_table
+            key_for_sources = term_in_table
+            unique_sources = set(self.direct_phrase_sources.get(key_for_sources, []))
+            if not unique_sources:
+                sources_to_display = [("جمله‌ای برای عبارت کلیدی یافت نشد.", "")]
+            else:
+                sources_to_display = sorted(list(unique_sources), key=lambda x: (x[1] is None, x[1], x[0]))
+        elif 'substring_hit' in item_tags:
+            # For substring hits, the actual found word is in column 1 (کلمه)
+            self.current_found_word = term_in_table
+            key_for_sources = term_in_table
+            unique_sources = set(self.direct_phrase_sources.get(key_for_sources, []))
+            if not unique_sources:
+                sources_to_display = [("جمله‌ای برای این کلمه یافت نشد.", "")]
+            else:
+                sources_to_display = sorted(list(unique_sources), key=lambda x: (x[1] is None, x[1], x[0]))
+        elif 'collocation_hit' in item_tags:
+            self.current_found_word = term_in_table
+            key_for_mapping = (position_type, term_in_table)
+            unique_sources = set(self.sentence_mapping.get(key_for_mapping, []))
+            if not unique_sources:
+                sources_to_display = [("جمله‌ای برای این کلمه هم‌نشین یافت نشد.", "")]
+            else:
+                sources_to_display = sorted(list(unique_sources), key=lambda x: (x[1] is None, x[1], x[0]))
+        else:
+            sources_to_display = [("نوع نتیجه نامشخص است.", "")]
+
+        self.current_source_sentences_for_export = sources_to_display
+        self._apply_or_remove_highlights()
+
+    # --- START OF MODIFIED SECTION ---
+    def _apply_or_remove_highlights(self):
+        """
+        روش جدید و پایدار برای نمایش جملات منبع.
+        ابتدا تمام محتوا را درج کرده و سپس هایلایت را اعمال می‌کند.
+        این روش از بازچینی پیچیده و مستعد خطای متن (reordering) پرهیز می‌کند.
+        """
         self.source_text.config(state=tk.NORMAL)
         self.source_text.delete(1.0, tk.END)
 
-        # برای حفظ ترتیب ثابت و استفاده در اکسپورت، لیست را مرتب می‌کنیم و ذخیره می‌کنیم
-        self.current_source_sentences_for_export = sorted(list(unique_sources), key=lambda x: (x[1] is None, x[1], x[0]))
-
-
-        for i, (sentence, book_path) in enumerate(self.current_source_sentences_for_export): # استفاده از لیست ذخیره شده
+        # مرحله 1: تمام محتوا (لینک‌ها و جملات) را در ویجت درج کن
+        for i, (original_sentence, book_path) in enumerate(self.current_source_sentences_for_export):
             if i > 0:
-                self.source_text.insert(tk.END, "\n\n---\n\n")
-            
-            if book_path and hasattr(self, 'root_folder_path') and self.root_folder_path:
-                book_name_with_extension = f"{Path(book_path).name}.docx"
-                full_book_path = self.root_folder_path / f"{book_path}.docx"
-                tag_name = f"book_link_{i}"
-                self.source_text.insert(tk.END, f"({book_name_with_extension})\n", ("rtl_align", tag_name))
-                self.source_text.tag_config(tag_name, foreground="blue", underline=True)
-                self.source_text.tag_bind(tag_name, "<Button-1>", lambda e, path=full_book_path: self._open_file(path))
-            elif book_path:
-                book_name_with_extension = f"{Path(book_path).name}.docx"
-                self.source_text.insert(tk.END, f"({book_name_with_extension}) (مسیر فایل در دسترس نیست)\n", "rtl_align")
-            elif sentence == "جمله‌ای یافت نشد.":
-                 self.source_text.insert(tk.END, f"({sentence})\n", "rtl_align")
+                self.source_text.insert(tk.END, "\n\n---\n\n", "rtl_align")
 
-            self.source_text.insert(tk.END, sentence, "rtl_align")
+            is_special_message = original_sentence.startswith("جمله‌ای") or original_sentence == "نوع نتیجه نامشخص است."
+            if is_special_message:
+                self.source_text.insert(tk.END, f"{original_sentence}\n", "rtl_align")
+                continue
 
-        self._apply_or_remove_highlights() # اعمال یا حذف هایلایت‌ها بر اساس وضعیت دکمه
+            if book_path:
+                file_info_start_idx = self.source_text.index(tk.INSERT)
+                book_name_ext = f"{Path(book_path).name}.docx"
+
+                if hasattr(self, 'root_folder_path') and self.root_folder_path:
+                    full_b_path = self.root_folder_path / f"{book_path}.docx"
+                    tag_name = f"book_link_{i}"
+                    file_info_display = f"({book_name_ext})\n"
+
+                    self.source_text.insert(tk.INSERT, file_info_display, ("rtl_align", tag_name))
+                    end_idx_file_link = self.source_text.index(f"{tk.INSERT}-1c")
+                    self.source_text.tag_add(tag_name, file_info_start_idx, end_idx_file_link)
+                    self.source_text.tag_config(tag_name, foreground="darkblue", underline=True)
+                    self.source_text.tag_bind(tag_name, "<Button-1>",
+                                              lambda e, p=str(full_b_path): self._open_file(Path(p)))
+                else:
+                    self.source_text.insert(tk.END, f"({book_name_ext}) (مسیر فایل در دسترس نیست)\n", "rtl_align")
+
+            # درج خود جمله بدون هیچ بازچینی
+            self.source_text.insert(tk.END, original_sentence, "rtl_align")
+
+        # مرحله 2: هایلایت را روی کل متن اعمال کن
+        highlight_option = self.highlight_options_var.get()
+        if highlight_option != "بدون هایلایت" and self.current_found_word:
+            self._highlight_text_in_range(
+                text_widget=self.source_text,
+                phrase=self.current_found_word,
+                tag="highlight_found",
+                start_range="1.0",
+                end_range=tk.END
+            )
 
         self.source_text.config(state=tk.DISABLED)
 
-    def _toggle_highlighting_status(self):
-        """وضعیت هایلایت را بر اساس چک‌باکس تغییر داده و نمایش را به‌روز می‌کند."""
-        self._apply_or_remove_highlights()
+    def _highlight_text_in_range(self, text_widget, phrase, tag, start_range, end_range):
+        current_pos = start_range
+        while True:
+            pos = text_widget.search(phrase, current_pos, stopindex=end_range, nocase=True, regexp=False, elide=False)
+            if not pos:
+                break
 
-    def _apply_or_remove_highlights(self):
-        """هایلایت‌ها را بر اساس وضعیت self.highlight_enabled_var اعمال یا حذف می‌کند و مشکل RTL را مدیریت می‌کند."""
-        self.source_text.config(state=tk.NORMAL)
-        
-        # پاک کردن تگ‌های هایلایت قبلی
-        self.source_text.tag_remove("highlight_phrase", "1.0", tk.END)
-        self.source_text.tag_remove("highlight_found", "1.0", tk.END)
+            end_idx_highlight_str = f"{pos}+{len(phrase)}c"
+            actual_end_idx_highlight = text_widget.index(end_idx_highlight_str)
 
-        # دریافت متن فعلی که توسط _on_result_click با محتوای اصلی پر شده است
-        # این متن هنوز هایلایت نشده و بازآرایی هم نشده است.
-        # نکته: _on_result_click باید اطمینان حاصل کند که متن اصلی را قبل از این تابع قرار داده است.
-        # در واقع، _on_result_click ابتدا متن را می‌چیند، سپس این تابع را صدا می‌زند.
-        # پس متن موجود در self.source_text در این لحظه، متن اصلی و مرتب شده (بر اساس فایل‌ها) است.
+            is_start_boundary = (pos == "1.0" or not text_widget.get(f"{pos}-1c", pos).isalnum())
 
-        current_text_content = self.source_text.get("1.0", tk.END).strip()
-        # حذف تگ justify راست چین تا بعد از بازچینی دوباره اعمال شود
-        self.source_text.tag_remove("rtl_align", "1.0", tk.END) 
-        self.source_text.delete("1.0", tk.END) # پاک کردن کامل برای بازچینی
+            is_end_boundary = True
+            try:
+                next_char = text_widget.get(actual_end_idx_highlight, f"{actual_end_idx_highlight}+1c")
+                if next_char.isalnum():
+                    is_end_boundary = False
+            except tk.TclError:
+                pass  # Reached the end of the text
 
-        processed_text_for_display = current_text_content
+            if is_start_boundary and is_end_boundary:
+                text_widget.tag_add(tag, pos, actual_end_idx_highlight)
 
-        if self.highlight_enabled_var.get() and self.current_found_word:
-            # فقط اگر هایلایت کلمه مجاور فعال است و کلمه مجاور وجود دارد، بازآرایی را انجام بده
-            # این فرض بر این است که مشکل به هم ریختگی فقط با highlight_found رخ می‌دهد.
-            processed_text_for_display = self._reorder_text_for_highlighting(current_text_content, self.current_found_word)
+            current_pos = actual_end_idx_highlight
 
-        # قرار دادن متن (اصلی یا بازآرایی شده) در ویجت
-        # ابتدا تمام متن را با تگ راست‌چین وارد می‌کنیم
-        # اطمینان از اینکه در انتهای متن یک newline وجود دارد اگر متن اصلی داشته
-        if processed_text_for_display and not processed_text_for_display.endswith('\n'):
-            processed_text_for_display += '\n'
-        self.source_text.insert(tk.END, processed_text_for_display)
-        self.source_text.tag_add("rtl_align", "1.0", tk.END) # اعمال مجدد تگ راست چین به کل متن
-
-
-        # اعمال هایلایت‌ها (اگر فعال باشند) روی متن جدید (که ممکن است بازآرایی شده باشد)
-        if self.highlight_enabled_var.get():
-            # if self.last_search_phrase: # هایلایت عبارت کلیدی حذف شد طبق درخواست
-            #     self._highlight_text(self.source_text, self.last_search_phrase, "highlight_phrase")
-            # هایلایت کلمه مجاور (highlight_found) روی متن بازآرایی شده اعمال می‌شود
-            if self.current_found_word:
-                self._highlight_text(self.source_text, self.current_found_word, "highlight_found")
-        
-        self.source_text.config(state=tk.DISABLED)
-
-    def _reorder_text_for_highlighting(self, original_text, highlight_word):
-        """
-        ترتیب بخش‌های غیرهایلایت شده متن را معکوس می‌کند تا مشکل نمایش RTL در Tkinter را دور بزند.
-        مثال: "P1 H P2 H P3" (که H هایلایت است) باید به "P3 H P2 H P1" تبدیل شود.
-        """
-        if not highlight_word or not original_text: # اضافه کردن بررسی original_text
-            return original_text
-
-        # برای جلوگیری از مشکلات با کاراکترهای خاص regex در highlight_word
-        escaped_highlight_word = re.escape(highlight_word)
-        
-        # اگر کلمه هایلایت اصلا در متن نیست، متن اصلی را برگردان
-        if not re.search(escaped_highlight_word, original_text):
-            return original_text
-
-        text_chunks = []    # بخش‌های متنی که هایلایت نمی‌شوند
-        highlight_chunks = [] # خود کلمات هایلایت شده (که ترتیبشان ثابت می‌ماند)
-
-        last_idx = 0
-        # re.finditer برای یافتن تمام وقوع‌های غیرهمپوشان highlight_word
-        for match in re.finditer(escaped_highlight_word, original_text):
-            start_idx, end_idx = match.span()
-            text_chunks.append(original_text[last_idx:start_idx]) # متن قبل از هایلایت
-            highlight_chunks.append(original_text[start_idx:end_idx]) # خود کلمه هایلایت
-            last_idx = end_idx
-        text_chunks.append(original_text[last_idx:]) # متن باقیمانده بعد از آخرین هایلایت
-
-        # معکوس کردن ترتیب فقط بخش‌های متنی (غیرهایلایت)
-        text_chunks.reverse()
-
-        # بازسازی متن نهایی
-        # "P4 H P3 H P2 H P1"
-        # text_chunks: [P4, P3, P2, P1]
-        # highlight_chunks: [H, H, H]
-        # result = P4 + H + P3 + H + P2 + H + P1
-        
-        reordered_text = ""
-        # تعداد بخش‌های متنی همیشه یکی بیشتر از تعداد هایلایت‌هاست
-        # (مگر اینکه متن با هایلایت شروع و با هایلایت تمام شود که در آن صورت مساوی هستند،
-        # یا اگر اصلا هایلایتی نباشد که در آن صورت یک بخش متنی داریم)
-
-        if not highlight_chunks: # اگر هیچ هایلایتی یافت نشد (نباید اینجا برسیم اگر چک اولیه انجام شده)
-            return original_text # یا "".join(text_chunks)
-
-        for i in range(len(highlight_chunks)):
-            reordered_text += text_chunks[i]
-            reordered_text += highlight_chunks[i]
-        
-        # اضافه کردن آخرین بخش متنی (که پس از آخرین هایلایت می‌آید یا اگر هایلایتی نبود، کل متن است)
-        # اگر text_chunks طولانی‌تر از highlight_chunks باشد (که معمولا هست)
-        if len(text_chunks) > len(highlight_chunks):
-            reordered_text += text_chunks[-1]
-            
-        return reordered_text
+    # تابع _reorder_text_for_highlighting حذف شد
+    # --- END OF MODIFIED SECTION ---
 
     def _open_file(self, file_path: Path):
         try:
-            # تبدیل شی Path به رشته قبل از ارسال به os.startfile
+            if not file_path.exists():
+                messagebox.showerror("فایل یافت نشد", f"فایل در مسیر زیر یافت نشد:\n{file_path}")
+                return
             os.startfile(str(file_path))
-        except FileNotFoundError:
-            messagebox.showerror("خطا در باز کردن فایل", f"فایل در مسیر زیر یافت نشد:\n{file_path}")
         except Exception as e:
             messagebox.showerror("خطا در باز کردن فایل", f"امکان باز کردن فایل وجود نداشت:\n{e}")
-
-    def _fixed_map(self, option):
-        style = ttk.Style(self.root)
-        return [e for e in style.map("Treeview", query_opt=option) if e[:2] != ("!disabled", "!selected")]
 
     def _export_results_to_excel(self):
         if not self.results_tree.get_children():
             messagebox.showinfo("خالی از نتیجه", "هیچ نتیجه‌ای برای خروجی گرفتن وجود ندارد.")
             return
-
         file_path = filedialog.asksaveasfilename(
-            defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
             title="ذخیره نتایج جستجو در فایل اکسل"
         )
-        if not file_path:
-            return
-
+        if not file_path: return
         try:
             data = []
             cols = ("نمونه", "کلمه", "فراوانی", "موقعیت")
             for item_id in self.results_tree.get_children():
                 values = self.results_tree.item(item_id, "values")
-                if values and len(values) == len(cols): # اطمینان از وجود مقادیر و تعداد صحیح آنها
-                     # بررسی مورد خاص "هیچ نتیجه‌ای یافت نشد."
-                    if values[1] == "هیچ نتیجه‌ای یافت نشد.":
-                        continue
+                if values and len(values) == len(cols) and values[1] != "هیچ نتیجه‌ای یافت نشد.":
                     data.append(dict(zip(cols, values)))
-            
-            if not data: # اگر پس از فیلتر کردن، داده‌ای باقی نمانده باشد
-                messagebox.showinfo("خالی از نتیجه", "هیچ نتیجه معتبری برای خروجی گرفتن وجود ندارد.")
-                return
-
+            if not data: messagebox.showinfo("خالی از نتیجه", "هیچ نتیجه معتبری برای خروجی گرفتن وجود ندارد."); return
             df = pd.DataFrame(data)
             df.to_excel(file_path, index=False, engine='openpyxl')
             messagebox.showinfo("موفقیت", f"نتایج با موفقیت در فایل زیر ذخیره شد:\n{file_path}")
@@ -382,38 +404,28 @@ class TextAnalyzerApp:
 
     def _export_source_sentences_to_excel(self):
         if not self.current_source_sentences_for_export or \
-           (len(self.current_source_sentences_for_export) == 1 and self.current_source_sentences_for_export[0][0] == "جمله‌ای یافت نشد."):
+                (len(self.current_source_sentences_for_export) == 1 and self.current_source_sentences_for_export[0][
+                    0].startswith("جمله‌ای")):
             messagebox.showinfo("خالی از نتیجه", "هیچ جمله منبعی برای خروجی گرفتن وجود ندارد.")
             return
-
         file_path = filedialog.asksaveasfilename(
-            defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
             title="ذخیره جملات منبع در فایل اکسل"
         )
-        if not file_path:
-            return
-
+        if not file_path: return
         try:
             data_to_export = []
             for sentence, book_relative_path_no_ext in self.current_source_sentences_for_export:
-                if sentence == "جمله‌ای یافت نشد.": # از این مورد صرف نظر کن
-                    continue
-                book_name = ""
-                if book_relative_path_no_ext:
-                    book_name = f"{Path(book_relative_path_no_ext).name}.docx"
+                if sentence.startswith("جمله‌ای"): continue
+                book_name = f"{Path(book_relative_path_no_ext).name}.docx" if book_relative_path_no_ext else ""
                 data_to_export.append({"جمله منبع": sentence, "نام فایل": book_name})
-            
-            if not data_to_export: # اگر پس از فیلتر کردن، داده‌ای باقی نمانده باشد
-                 messagebox.showinfo("خالی از نتیجه", "هیچ جمله منبع معتبری برای خروجی گرفتن وجود ندارد.")
-                 return
-
+            if not data_to_export: messagebox.showinfo("خالی از نتیجه",
+                                                       "هیچ جمله منبع معتبری برای خروجی گرفتن وجود ندارد."); return
             df = pd.DataFrame(data_to_export)
             df.to_excel(file_path, index=False, engine='openpyxl')
             messagebox.showinfo("موفقیت", f"جملات منبع با موفقیت در فایل زیر ذخیره شدند:\n{file_path}")
         except Exception as e:
             messagebox.showerror("خطا در ذخیره‌سازی", f"خطایی در هنگام ذخیره فایل اکسل رخ داد:\n{e}")
-
 
     def _prepare_for_loading(self):
         self.search_button.config(state=tk.DISABLED);
@@ -427,13 +439,12 @@ class TextAnalyzerApp:
             threading.Thread(target=self._load_from_cache, daemon=True).start()
         else:
             self._update_status("فایل کش یافت نشد. لطفاً منابع را برای پردازش اولیه انتخاب کنید.")
-            # ذخیره مسیر پوشه اصلی
             root_folder_path_str = filedialog.askdirectory(title="پوشه اصلی حاوی کتاب‌ها را انتخاب کنید")
             if not root_folder_path_str:
                 self._enable_ui_after_load("عملیات لغو شد.")
+                self.root.title(self.base_title)
                 return
-            self.root_folder_path = Path(root_folder_path_str).resolve() # ذخیره مسیر مطلق
-
+            self.root_folder_path = Path(root_folder_path_str).resolve()
             correction_path_str = filedialog.askopenfilename(title="فایل اکسل 'لیست اصلاحات' را انتخاب کنید (اختیاری)",
                                                              filetypes=(("Excel Files", "*.xlsx *.xlsm"),
                                                                         ("All files", "*.*")))
@@ -445,17 +456,15 @@ class TextAnalyzerApp:
         try:
             with open(self.cache_path, 'rb') as f:
                 cache_content = pickle.load(f)
-                # بررسی فرمت جدید کش که شامل مسیر پوشه اصلی است
                 if isinstance(cache_content, tuple) and len(cache_content) == 2 and isinstance(cache_content[1], Path):
                     self.tagged_data, self.root_folder_path = cache_content
-                else: # سازگاری با فرمت کش قدیمی
-                    self.tagged_data = cache_content # یا cache_content[0] اگر مطمئنید که همیشه یک تاپل بوده
-                    self.root_folder_path = None # نشان می‌دهد که مسیر پوشه در کش نیست
-                    # نمایش هشدار به کاربر پس از بارگذاری کامل UI
+                else:
+                    self.tagged_data = cache_content
+                    self.root_folder_path = None
                     self.root.after(100, lambda: messagebox.showwarning("فایل کش قدیمی",
-                                                                       "فایل کش شما قدیمی است و مسیر پوشه اصلی کتاب‌ها را ندارد. "
-                                                                       "برای فعال شدن قابلیت کلیک روی نام فایل در بخش جملات منبع، "
-                                                                       "لطفاً داده‌ها را با استفاده از دکمه 'پردازش مجدد داده‌ها' دوباره پردازش کنید."))
+                                                                        "فایل کش شما قدیمی است و مسیر پوشه اصلی کتاب‌ها را ندارد. "
+                                                                        "برای فعال شدن قابلیت کلیک روی نام فایل، "
+                                                                        "لطفاً داده‌ها را با استفاده از منوی فایل و گزینه 'پردازش مجدد داده‌ها' دوباره پردازش کنید."))
             self.root.after(0, self._enable_ui_after_load,
                             f"داده‌ها با موفقیت از کش بارگذاری شد ({len(self.tagged_data)} ردیف).")
         except Exception as e:
@@ -468,69 +477,44 @@ class TextAnalyzerApp:
                                "آیا مطمئن هستید؟\nاین کار فایل کش فعلی را حذف کرده و فرآیند زمان‌بر پردازش تمام کتاب‌ها را دوباره آغاز می‌کند."):
             try:
                 if os.path.exists(self.cache_path): os.remove(self.cache_path)
+                self.root.title(self.base_title)
                 self._initiate_loading_process()
             except Exception as e:
                 messagebox.showerror("خطا", f"امکان حذف فایل کش وجود نداشت: {e}")
 
-    # توابع _get_text_from_docx, _load_correction_list, _make_corrections_fast, 
-    # _process_paragraphs, _find_best_split_point به text_processing.py منتقل شدند.
-
     def _process_and_cache_worker(self, root_folder: Path, correction_path: Path | None):
         try:
             self.root.after(0, self._update_status, "در حال خواندن لیست اصلاحات...")
-            # استفاده از تابع منتقل شده
             correction_dict = text_processing.load_correction_list(correction_path)
-            
-            if not hasattr(self, 'root_folder_path') or not self.root_folder_path:
-                 self.root_folder_path = root_folder.resolve()
-            else: 
-                 self.root_folder_path = Path(self.root_folder_path).resolve()
+            self.root_folder_path = root_folder.resolve()
 
             docx_files = list(self.root_folder_path.rglob('*.docx'))
             if not docx_files:
                 self.root.after(0, self._enable_ui_after_load, "هیچ فایل .docx یافت نشد.");
                 return
 
-            all_segments_data, total_files = [], len(docx_files) # تغییر نام all_segments به all_segments_data
-            for i, file_path_obj in enumerate(docx_files): # تغییر نام file_path به file_path_obj
-                self.root.after(0, self._update_progress, (i / total_files) * 50, f"پردازش فایل‌ها: {file_path_obj.name}")
-                # استفاده از تابع منتقل شده
+            all_segments_data = []
+            total_files = len(docx_files)
+            for i, file_path_obj in enumerate(docx_files):
+                self.root.after(0, self._update_progress, (i / total_files) * 50,
+                                f"پردازش فایل‌ها: {file_path_obj.name}")
                 text_content = text_processing.get_text_from_docx(file_path_obj)
                 if text_content:
-                    # نرمال‌سازی و اصلاحات قبل از ارسال به process_paragraphs انجام می‌شود
-                    # normalized_text = self.normalizer.normalize(text_content) # نرمالایزر خود کلاس استفاده میشود
-                    # corrected_text = text_processing.make_corrections_fast(normalized_text, correction_dict)
-                    # processed_segments = text_processing.process_paragraphs(
-                    #     corrected_text.split('\n'), 
-                    #     self.normalizer, # ارسال نرمالایزر نمونه از کلاس
-                    #     self.MAX_WORDS, 
-                    #     self.IDEAL_WORDS
-                    # )
-                    
-                    # --- بازنگری در ترتیب عملیات ---
-                    # 1. خواندن متن خام
-                    # 2. اعمال اصلاحات سریع روی متن خام (اگر لازم است قبل از نرمالایزر باشد)
-                    # 3. ارسال متن (احتمالا اصلاح شده) به process_paragraphs که خودش نرمالایز هم میکند.
-                    
                     corrected_text = text_processing.make_corrections_fast(text_content, correction_dict)
                     processed_segments = text_processing.process_paragraphs(
-                        corrected_text.split('\n'), # ارسال پاراگراف‌های خام (پس از اصلاح اولیه)
-                        self.normalizer,           # نرمالایزر داخل process_paragraphs اعمال می‌شود
-                        self.MAX_WORDS,
-                        self.IDEAL_WORDS
+                        corrected_text.split('\n'), self.normalizer, self.MAX_WORDS, self.IDEAL_WORDS
                     )
-
                     relative_file_path = file_path_obj.relative_to(self.root_folder_path)
-                    for segment_text in processed_segments: # تغییر نام segment به segment_text
-                        all_segments_data.append({'book_path': str(relative_file_path.with_suffix('')), 'sentence': segment_text})
+                    for segment_text in processed_segments:
+                        all_segments_data.append(
+                            {'book_path': str(relative_file_path.with_suffix('')), 'sentence': segment_text})
 
-            temp_tagged_data, total_segments = [], len(all_segments_data) # اطمینان از استفاده از all_segments_data
-            for i, item in enumerate(all_segments_data): # اطمینان از استفاده از all_segments_data
+            temp_tagged_data, total_segments = [], len(all_segments_data)
+            for i, item in enumerate(all_segments_data):
                 self.root.after(0, self._update_progress, 50 + (i / total_segments) * 50,
                                 f"تحلیل دستوری بخش {i + 1} از {total_segments}...")
                 tokens = word_tokenize(item['sentence']);
                 tagged = self.pos_tagger.tag(tokens)
-                # 'book_path' شامل مسیر نسبی بدون پسوند است
                 temp_tagged_data.append((item['sentence'], tagged, item['book_path']))
             self.tagged_data = temp_tagged_data
 
@@ -541,44 +525,51 @@ class TextAnalyzerApp:
                             f"پردازش و ذخیره‌سازی با موفقیت انجام شد ({len(self.tagged_data)} ردیف).")
         except Exception as e:
             traceback.print_exc();
-            if not hasattr(self, 'root_folder_path'): # اطمینان از وجود self.root_folder_path
-                self.root_folder_path = None
             self.root.after(0, self._show_generic_error, f"خطا در پردازش و ذخیره‌سازی: {e}")
 
     def _enable_ui_after_load(self, message):
         self.progressbar.pack_forget();
         self._update_status(message)
-        if self.tagged_data: self.search_button.config(state=tk.NORMAL)
+        if self.tagged_data:
+            self.search_button.config(state=tk.NORMAL)
+        if hasattr(self, 'root_folder_path') and self.root_folder_path:
+            self.root.title(f"{self.base_title} - {self.root_folder_path.name}")
+        elif "لغو شد" in message or "یافت نشد" in message:
+            self.root.title(self.base_title)
+        else:
+            self.root.title(self.base_title + " (مسیر پوشه نامشخص)")
 
     def _show_generic_error(self, exc_str):
         self.progressbar.pack_forget();
         self._update_status("خطا در بارگذاری داده‌ها.")
+        self.root.title(self.base_title)
         messagebox.showerror("خطای پیش‌بینی نشده", f"خطایی رخ داد:\n\n{exc_str}")
 
     def _update_progress(self, value, text):
-        self.progressbar['value'] = value; self.status_var.set(text)
+        self.progressbar['value'] = value;
+        self.status_var.set(text)
 
     def _update_status(self, message):
         self.status_var.set(message)
 
     def _toggle_condition_entry(self, event=None):
-        if self.condition_var.get() in ["حاوی", "شروع با"]: # تغییر "کلمه خاص" به "حاوی"
+        if self.condition_var.get() in ["حاوی", "شروع با"]:
             self.condition_entry.grid()
         else:
             self.condition_entry.grid_remove()
 
-    def _start_search(self, event=None): # event پارامتر را اضافه میکنیم تا از bind هم دریافت شود
-        print(f"_start_search called by event: {event}") # برای دیباگ
+    def _start_search(self, event=None):
         phrase = self.keyword_entry.get().strip();
         if not phrase: messagebox.showwarning("ورودی نامعتبر", "لطفاً عبارت کلیدی را وارد کنید."); return
         self.last_search_phrase = phrase;
-        normalized_phrase = self.normalizer.normalize(phrase);
-        search_tokens = word_tokenize(normalized_phrase)
-        if not search_tokens: return
-        condition_type = self.condition_var.get();
-        condition_value = self.condition_entry.get().strip()
-        if condition_type != "فرقی نمی‌کند" and not condition_value: messagebox.showwarning("ورودی ناقص",
-                                                                                            f"برای شرط '{condition_type}' باید یک مقدار وارد کنید."); return
+
+        if self.search_type_var.get() == "کلمات مجاور":
+            condition_type = self.condition_var.get()
+            condition_value = self.condition_entry.get().strip()
+            if condition_type != "فرقی نمی‌کند" and not condition_value:
+                messagebox.showwarning("ورودی ناقص", f"برای شرط '{condition_type}' باید یک مقدار وارد کنید.");
+                return
+
         self.search_button.config(state=tk.DISABLED);
         self.results_tree.delete(*self.results_tree.get_children())
         self.source_text.config(state=tk.NORMAL);
@@ -586,8 +577,14 @@ class TextAnalyzerApp:
         self.source_text.config(state=tk.DISABLED)
         self.results_count_var.set("");
         self._update_status(f"در حال جستجو برای عبارت '{phrase}'...")
-        params = {"search_tokens": search_tokens, "mode": self.mode_var.get(), "condition_type": condition_type,
-                  "condition_value": self.normalizer.normalize(condition_value), "pos_filter": self.pos_var.get()}
+
+        params = {
+            "search_phrase": phrase,
+            "mode": self.mode_var.get(),
+            "condition_type": self.condition_var.get(),
+            "condition_value": self.normalizer.normalize(self.condition_entry.get().strip()),
+            "pos_filter": self.pos_var.get()
+        }
         threading.Thread(target=self._perform_search, args=(params,), daemon=True).start()
 
     def _check_filters(self, word, pos, params):
@@ -597,105 +594,114 @@ class TextAnalyzerApp:
             if pos not in required_tags: return False
         condition_type = params["condition_type"];
         condition_value = params["condition_value"]
-        if condition_type == "حاوی" and condition_value not in word: return False # تغییر "کلمه خاص" به "حاوی" و اصلاح شرط
+        if condition_type == "حاوی" and condition_value not in word: return False
         if condition_type == "شروع با" and not word.startswith(condition_value): return False
         return True
 
     def _perform_search(self, params):
-        search_tokens = params["search_tokens"];
-        search_phrase = " ".join(search_tokens);
-        phrase_len = len(search_tokens);
-        mode = params["mode"]
-        before_counter, after_counter = Counter(), Counter();
-        temp_sentence_mapping = defaultdict(list)
-        has_filters = params["pos_filter"] != "هر نقشی" or params["condition_type"] != "فرقی نمی‌کند"
+        search_type = self.search_type_var.get()
+        user_search_phrase = params["search_phrase"]
 
-        # book_path_or_name : می‌تواند مسیر نسبی یا نام فایل قدیمی باشد
-        for original_sentence, tagged_sentence, book_path_or_name in self.tagged_data:
-            words = [item[0] for item in tagged_sentence]
-            for i in range(len(words) - phrase_len + 1):
-                if words[i:i + phrase_len] == search_tokens:
-                    # book_path_or_name به عنوان سومین عنصر تاپل در sentence_mapping ذخیره می‌شود
-                    if mode in ["هر دو", "کلمه قبلی"] and i > 0:
-                        prev_word, prev_pos = tagged_sentence[i - 1]
-                        if not has_filters or self._check_filters(prev_word, prev_pos, params):
-                            before_counter[(prev_word, f"{prev_word} {search_phrase}")] += 1;
-                            temp_sentence_mapping[("قبل", prev_word)].append((original_sentence, book_path_or_name))
-                    if mode in ["هر دو", "کلمه بعدی"] and i + phrase_len < len(words):
-                        next_word, next_pos = tagged_sentence[i + phrase_len]
-                        if not has_filters or self._check_filters(next_word, next_pos, params):
-                            after_counter[(next_word, f"{search_phrase} {next_word}")] += 1;
-                            temp_sentence_mapping[("بعد", next_word)].append((original_sentence, book_path_or_name))
-        self.sentence_mapping = temp_sentence_mapping;
-        results = []
-        if mode in ["هر دو", "کلمه قبلی"]:
-            for (word, sample), count in before_counter.most_common(): results.append((sample, word, count, "قبل"))
-        if mode in ["هر دو", "کلمه بعدی"]:
-            for (word, sample), count in after_counter.most_common(): results.append((sample, word, count, "بعد"))
-        self.root.after(0, self._update_ui_with_results, results)
+        direct_phrase_info_list = []
+        collocation_results = []
+        self.direct_phrase_sources.clear()
+        self.sentence_mapping.clear()
 
-    def _update_ui_with_results(self, results):
+        if search_type == "عین عبارت کلیدی":
+            normalized_user_phrase = self.normalizer.normalize(user_search_phrase)
+            if not normalized_user_phrase.strip():
+                self.root.after(0, self._update_ui_with_results, [], []);
+                return
+
+            substring_match_counter = Counter()
+            for original_sentence, tagged_sentence, book_path_or_name in self.tagged_data:
+                normalized_original_sentence = self.normalizer.normalize(original_sentence)
+                if normalized_user_phrase in normalized_original_sentence:
+                    for word, _ in tagged_sentence:
+                        if normalized_user_phrase in self.normalizer.normalize(word):
+                            substring_match_counter[word] += 1
+                            self.direct_phrase_sources[word].append((original_sentence, book_path_or_name))
+                            break
+
+            for found_word, count in substring_match_counter.most_common():
+                sample_display = f"{found_word} ({user_search_phrase})"
+                direct_phrase_info_list.append((sample_display, found_word, count, "تطابق جزئی"))
+
+        elif search_type == "کلمات مجاور":
+            search_tokens = word_tokenize(self.normalizer.normalize(user_search_phrase))
+            if not search_tokens:
+                self.root.after(0, self._update_ui_with_results, [], []);
+                return
+
+            search_phrase_str = " ".join(search_tokens)
+            phrase_len = len(search_tokens)
+            mode = params["mode"]
+            before_counter, after_counter = Counter(), Counter()
+            exact_match_for_collocation_counter = 0
+            exact_match_sources_for_collocation = []
+            has_filters = params["pos_filter"] != "هر نقشی" or params["condition_type"] != "فرقی نمی‌کند"
+
+            for original_sentence, tagged_sentence, book_path_or_name in self.tagged_data:
+                words = [item[0] for item in tagged_sentence]
+                for i in range(len(words) - phrase_len + 1):
+                    if words[i:i + phrase_len] == search_tokens:
+                        exact_match_for_collocation_counter += 1
+                        exact_match_sources_for_collocation.append((original_sentence, book_path_or_name))
+                        if mode in ["هر دو", "کلمه قبلی"] and i > 0:
+                            prev_word, prev_pos = tagged_sentence[i - 1]
+                            if not has_filters or self._check_filters(prev_word, prev_pos, params):
+                                before_counter[(prev_word, f"{prev_word} {search_phrase_str}")] += 1
+                                self.sentence_mapping[("قبل", prev_word)].append((original_sentence, book_path_or_name))
+                        if mode in ["هر دو", "کلمه بعدی"] and i + phrase_len < len(words):
+                            next_word, next_pos = tagged_sentence[i + phrase_len]
+                            if not has_filters or self._check_filters(next_word, next_pos, params):
+                                after_counter[(next_word, f"{search_phrase_str} {next_word}")] += 1
+                                self.sentence_mapping[("بعد", next_word)].append((original_sentence, book_path_or_name))
+
+            if exact_match_for_collocation_counter > 0:
+                direct_phrase_info_list.append(
+                    (user_search_phrase, user_search_phrase, exact_match_for_collocation_counter, "عبارت کلیدی"))
+                self.direct_phrase_sources[user_search_phrase] = exact_match_sources_for_collocation
+
+            if mode in ["هر دو", "کلمه قبلی"]:
+                for (word, sample), count in before_counter.most_common():
+                    collocation_results.append((sample, word, count, "قبل"))
+            if mode in ["هر دو", "کلمه بعدی"]:
+                for (word, sample), count in after_counter.most_common():
+                    collocation_results.append((sample, word, count, "بعد"))
+
+        self.root.after(0, self._update_ui_with_results, direct_phrase_info_list, collocation_results)
+
+    def _update_ui_with_results(self, direct_phrase_info_list, collocation_results):
         self.results_tree.delete(*self.results_tree.get_children())
-        if not results:
-            self.results_tree.insert("", "end", values=("", "هیچ نتیجه‌ای یافت نشد.", "", ""));
+        total_results_count = 0
+
+        if direct_phrase_info_list:
+            for item_info in direct_phrase_info_list:
+                tag_to_use = 'direct_hit' if item_info[3] == "عبارت کلیدی" else 'substring_hit'
+                self.results_tree.insert("", "end", values=item_info, tags=(tag_to_use,))
+                total_results_count += 1
+
+        if collocation_results:
+            for item in collocation_results:
+                self.results_tree.insert("", "end", values=item, tags=('collocation_hit',))
+            total_results_count += len(collocation_results)
+
+        if total_results_count == 0:
+            self.results_tree.insert("", "end", values=("", "هیچ نتیجه‌ای یافت نشد.", "", ""))
             self.results_count_var.set("نتایج: 0")
         else:
-            for item in results: self.results_tree.insert("", "end", values=item)
-            self.results_count_var.set(f"نتایج: {len(results)}")
+            self.results_count_var.set(f"نتایج: {total_results_count}")
             self.root.after(100, lambda: self._sort_treeview('فراوانی', True))
-        self._update_status("پردازش کامل شد. آماده برای جستجوی بعدی.");
+
+        self._update_status("پردازش کامل شد. آماده برای جستجوی بعدی.")
         self.search_button.config(state=tk.NORMAL)
-
-    def _highlight_text(self, text_widget, phrase, tag):
-        start_index = "1.0"
-        text_widget.tag_remove(tag, "1.0", tk.END) # ابتدا تگ‌های قبلی این نوع را حذف می‌کنیم
-
-        if not phrase: # اگر عبارت جستجو خالی است، کاری انجام نده
-            return
-
-        while True:
-            pos = text_widget.search(phrase, start_index, stopindex=tk.END, nocase=True, regexp=False)
-            if not pos:
-                break
-            
-            # بررسی مرزهای کلمه برای جلوگیری از هایلایت بخشی از کلمات دیگر
-            is_start_boundary = False
-            if pos == "1.0": # اگر در ابتدای متن است
-                is_start_boundary = True
-            else:
-                prev_char_index = f"{pos}-1c"
-                prev_char = text_widget.get(prev_char_index, pos)
-                # حروف فارسی، انگلیسی، اعداد و نیم فاصله را به عنوان بخشی از کلمه در نظر نمی‌گیریم
-                # یعنی اگر کاراکتر قبلی جزو اینها نباشد، مرز کلمه است.
-                if not (prev_char.isalnum() or prev_char == '\u200c'): # \u200c is ZWNJ
-                    is_start_boundary = True
-
-            is_end_boundary = False
-            end_search_index_for_next_char = f"{pos}+{len(phrase)}c"
-            # بررسی اینکه آیا به انتهای متن رسیده‌ایم
-            # مقایسه end_search_index_for_next_char با tk.END به طور مستقیم کار نمی‌کند.
-            # به جای آن، سعی می‌کنیم کاراکتر بعدی را بخوانیم و اگر خطا داد یعنی به انتها رسیده‌ایم.
-            try:
-                # کاراکتر بعد از پایان عبارت یافت شده
-                next_char = text_widget.get(end_search_index_for_next_char, f"{end_search_index_for_next_char}+1c")
-                if not (next_char.isalnum() or next_char == '\u200c'):
-                    is_end_boundary = True
-            except tk.TclError: # به احتمال زیاد به انتهای متن رسیده‌ایم
-                is_end_boundary = True
-            
-            if is_start_boundary and is_end_boundary:
-                end_index = f"{pos}+{len(phrase)}c"
-                text_widget.tag_add(tag, pos, end_index)
-            
-            # حرکت به بعد از عبارت یافت شده (یا بخشی از عبارت) برای جستجوی بعدی
-            # این کار برای جلوگیری از لوپ بی‌نهایت در حالتی است که عبارت جستجو بخشی از خودش باشد (که اینجا رخ نمی‌دهد)
-            # یا برای اطمینان از پیشرفت جستجو
-            start_index = f"{pos}+{max(1, len(phrase))}c"
-
 
     def _sort_treeview(self, col, reverse):
         try:
-            data = [(self.results_tree.set(item, col), item) for item in self.results_tree.get_children('')]
+            data = [(self.results_tree.set(item, col), item) for item in self.results_tree.get_children('') if
+                    self.results_tree.set(item, 'کلمه') != "هیچ نتیجه‌ای یافت نشد."]
+
             if col == "فراوانی":
                 data.sort(key=lambda t: int(t[0]) if str(t[0]).isdigit() else 0, reverse=reverse)
             else:
@@ -708,11 +714,13 @@ class TextAnalyzerApp:
 
 if __name__ == "__main__":
     try:
-        from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1)
+        from ctypes import windll;
+
+        windll.shcore.SetProcessDpiAwareness(1)
     except:
         pass
     root = tk.Tk()
-    root.configure(bg='#333333')  # دقیقاً gray 20%
+    root.configure(bg='#333333')
     style = ttk.Style(root)
     style.theme_use("clam")
     app = TextAnalyzerApp(root)
