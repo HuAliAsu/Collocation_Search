@@ -162,7 +162,7 @@ class TextAnalyzerApp:
         # ایجاد نقشه معکوس برای تبدیل تگ به نام فارسی
         self.reverse_pos_map = {tag: name for name, tags in self.pos_map.items() for tag in tags}
 
-        # *** FIXED ***: متغیر برای منوی کشویی مدل هایلایت
+        # *** FIXED ***: متغیر برای منوی کشویی مدل هایلایت با مقدار پیش‌فرض صحیح
         self.highlight_model_var = tk.StringVar(value="مدل ۲ (معکوس کامل)")
         self.current_found_word = None
         self.current_source_sentences_for_export = []
@@ -275,7 +275,7 @@ class TextAnalyzerApp:
         self.source_text.tag_configure("rtl_align", justify='right')
         self.source_text.tag_configure("highlight_found", background="#ADD8E6", relief=tk.RAISED, borderwidth=1)
 
-        # *** FIXED ***: بازگرداندن تعریف متغیر برای نوار وضعیت
+        # *** FIXED ***: بازگرداندن تعریف متغیر و نوار وضعیت
         self.results_count_var = tk.StringVar(value="")
         status_bar_frame = ttk.Frame(self.root, relief=tk.SUNKEN, padding=0)
         status_bar_frame.pack(side=tk.BOTTOM, fill=tk.X)
@@ -438,7 +438,7 @@ class TextAnalyzerApp:
                 if len(segments) >= 2:
                     last_pair = segments[-2:]
                     other_segments = segments[:-2]
-                    reordered_segments = last_pair + list(reversed(other_segments))
+                    reordered_segments = list(reversed(other_segments)) + last_pair
                 else:
                     reordered_segments = segments
 
@@ -447,7 +447,7 @@ class TextAnalyzerApp:
                 if len(segments) >= 2:
                     first_pair = segments[:2]
                     other_segments = segments[2:]
-                    reordered_segments = list(reversed(other_segments)) + first_pair
+                    reordered_segments = first_pair + list(reversed(other_segments))
                 else:
                     reordered_segments = segments
 
@@ -554,7 +554,14 @@ class TextAnalyzerApp:
         if not self.results_tree.get_children():
             messagebox.showinfo("خالی از نتیجه", "هیچ نتیجه‌ای برای خروجی گرفتن وجود ندارد.")
             return
+
+        default_filename = ""
+        if self.last_search_phrase:
+            safe_phrase = re.sub(r'[\\/*?:"<>|]', "", self.last_search_phrase)
+            default_filename = f"{safe_phrase}_نتایج.xlsx"
+
         file_path = filedialog.asksaveasfilename(
+            initialfile=default_filename,
             defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
             title="ذخیره نتایج جستجو در فایل اکسل"
         )
@@ -579,7 +586,15 @@ class TextAnalyzerApp:
                     0].startswith("جمله‌ای")):
             messagebox.showinfo("خالی از نتیجه", "هیچ جمله منبعی برای خروجی گرفتن وجود ندارد.")
             return
+
+        default_filename = ""
+        search_keyword = self.last_search_phrase
+        if search_keyword:
+            safe_phrase = re.sub(r'[\\/*?:"<>|]', "", search_keyword)
+            default_filename = f"{safe_phrase}_جملات_منبع.xlsx"
+
         file_path = filedialog.asksaveasfilename(
+            initialfile=default_filename,
             defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
             title="ذخیره جملات منبع در فایل اکسل"
         )
