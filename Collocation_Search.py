@@ -8,8 +8,122 @@ from hazm import Normalizer, word_tokenize, POSTagger
 import traceback
 import pickle
 from pathlib import Path
-import text_processing
+import re
+import docx
 
+
+# ==============================================================================
+# بخش توابع پردازش متن (ادغام شده از text_processing.py)
+# ==============================================================================
+
+def get_text_from_docx(file_path: Path) -> str | None:
+    """متن را از یک فایل .docx استخراج می‌کند."""
+    try:
+        doc = docx.Document(file_path)
+        return '\n'.join([para.text for para in doc.paragraphs])
+    except Exception:
+        # در صورت بروز خطا، می‌توان لاگ ثبت کرد یا خطا را مدیریت کرد
+        return None
+
+
+def load_correction_list(file_path: Path | None) -> dict:
+    """لیست اصلاحات را از یک فایل اکسل بارگذاری می‌کند."""
+    if not file_path or not file_path.exists():
+        return {}
+    try:
+        all_sheets = pd.read_excel(file_path, sheet_name=None, header=None, names=['incorrect', 'correct'],
+                                   engine='openpyxl')
+        correction_dict = {}
+        for _, df_sheet in all_sheets.items():
+            df_sheet.dropna(inplace=True)
+            correction_dict.update(dict(zip(df_sheet['incorrect'].astype(str), df_sheet['correct'].astype(str))))
+        return correction_dict
+    except Exception:
+        # مدیریت خطا
+        return {}
+
+
+def make_corrections_fast(text: str, correction_dict: dict) -> str:
+    """اصلاحات را بر اساس دیکشنری داده شده روی متن اعمال می‌کند."""
+    if not correction_dict or not text:
+        return text
+    # ساخت یک regex واحد برای تمام کلیدها برای بهبود سرعت
+    regex = r'\b(' + '|'.join(re.escape(key) for key in correction_dict.keys()) + r')\b'
+    return re.sub(regex, lambda m: correction_dict[m.group(0)], text)
+
+
+def find_best_split_point(text: str, ideal_pos: int, max_words_limit: int) -> int:
+    """بهترین نقطه برای تقسیم یک پاراگراف طولانی را پیدا می‌کند."""
+    end_chars = {'.', '!', '?', ':', '؟'}
+    search_limit = min(len(text), ideal_pos + 50)
+    search_range = text[:search_limit]
+
+    last_punc_pos = -1
+    for char_punc in end_chars:
+        pos = search_range.rfind(char_punc)
+        if pos > last_punc_pos:
+            last_punc_pos = pos
+
+    if last_punc_pos != -1 and last_punc_pos > ideal_pos / 2:
+        return last_punc_pos + 1
+
+    space_search_range_end = min(len(text), ideal_pos + 20)
+    space_pos = text.rfind(' ', 0, space_search_range_end)
+
+    if space_pos != -1 and space_pos > ideal_pos / 3:
+        return space_pos + 1
+
+    return min(ideal_pos, len(text))
+
+
+def process_paragraphs(paragraphs: list[str], normalizer, max_words: int, ideal_words: int) -> list[str]:
+    """
+    پاراگراف‌ها را نرمال‌سازی، ادغام، و در صورت نیاز تقسیم می‌کند.
+    """
+    if normalizer is None:
+        raise ValueError("Normalizer cannot be None in process_paragraphs")
+
+    end_chars = {'.', '!', '?', ':', '؟'}
+    merged_paragraphs, buffer = [], ""
+
+    for para_text in paragraphs:
+        cleaned_para = normalizer.normalize(para_text.strip())
+        if not cleaned_para:
+            continue
+
+        buffer = (buffer + " " + cleaned_para) if buffer else cleaned_para
+        if buffer.endswith(tuple(end_chars)):
+            merged_paragraphs.append(buffer)
+            buffer = ""
+
+    if buffer:
+        merged_paragraphs.append(buffer)
+
+    final_segments = []
+    for current_segment in merged_paragraphs:
+        words = current_segment.split()
+        if len(words) <= max_words:
+            final_segments.append(current_segment)
+            continue
+
+        temp_paragraph_to_split = current_segment
+        while len(temp_paragraph_to_split.split()) > max_words:
+            split_point = find_best_split_point(temp_paragraph_to_split, ideal_words, max_words)
+
+            segment_to_add = temp_paragraph_to_split[:split_point].strip()
+            if segment_to_add:
+                final_segments.append(segment_to_add)
+            temp_paragraph_to_split = temp_paragraph_to_split[split_point:].strip()
+
+        if temp_paragraph_to_split:
+            final_segments.append(temp_paragraph_to_split)
+
+    return final_segments
+
+
+# ==============================================================================
+# کلاس اصلی برنامه
+# ==============================================================================
 
 class TextAnalyzerApp:
     def __init__(self, root):
@@ -38,13 +152,18 @@ class TextAnalyzerApp:
             messagebox.showerror("خطای Hazm", f"خطا در بارگذاری مدل‌های Hazm:\n{e}")
             self.root.destroy();
             return
+        # نقشه تگ‌های دستوری به نام‌های فارسی
         self.pos_map = {
             "اسم": {"NOUN", "NOUN,EZ"}, "فعل": {"VERB"}, "صفت": {"ADJ", "ADJ,EZ"},
             "قید": {"ADV"}, "ضمیر": {"PRON"}, "عدد": {"NUM", "NUM,EZ"},
             "حرف اضافه": {"ADP", "ADP,EZ"}, "حرف ربط": {"CCONJ", "SCONJ"},
             "نقطه‌گذاری": {"PUNCT"}, "تعیین‌کننده": {"DET"}, "حرف ندا": {"INTJ"}
         }
-        self.highlight_enabled_var = tk.BooleanVar(value=True)
+        # ایجاد نقشه معکوس برای تبدیل تگ به نام فارسی
+        self.reverse_pos_map = {tag: name for name, tags in self.pos_map.items() for tag in tags}
+
+        # *** FIXED ***: متغیر برای منوی کشویی مدل هایلایت
+        self.highlight_model_var = tk.StringVar(value="مدل ۲ (معکوس کامل)")
         self.current_found_word = None
         self.current_source_sentences_for_export = []
         self._create_widgets()
@@ -106,15 +225,15 @@ class TextAnalyzerApp:
                                         state=tk.DISABLED)
         self.search_button.pack(side=tk.LEFT, padx=(5, 0), pady=5, ipady=2)
 
-        self.results_count_var = tk.StringVar(value="")
-
-        self.highlight_options_var = tk.StringVar(value="کلمه یافت شده")
-        highlight_choices = ["بدون هایلایت", "کلمه یافت شده", "کلمه یافت شده EN"]
-        self.highlight_combo = ttk.Combobox(search_controls_main_frame, textvariable=self.highlight_options_var,
-                                            values=highlight_choices, state="readonly", width=15, justify='right')
-        self.highlight_combo.pack(side=tk.LEFT, padx=(0, 5), pady=5)
-        self.highlight_combo.bind("<<ComboboxSelected>>", self._on_highlight_option_change)
-        ttk.Label(search_controls_main_frame, text=":هایلایت").pack(side=tk.LEFT, padx=(2, 0), pady=5)
+        # *** FIXED ***: بازگرداندن منوی کشویی مدل‌های هایلایت
+        highlight_model_choices = ["بدون هایلایت", "مدل ۱ (عادی)", "مدل ۲ (معکوس کامل)", "مدل ۳ (جفت آخر عادی)",
+                                   "مدل ۴ (جفت اول عادی)"]
+        self.highlight_model_combo = ttk.Combobox(search_controls_main_frame, textvariable=self.highlight_model_var,
+                                                  values=highlight_model_choices, state="readonly", width=20,
+                                                  justify='right')
+        self.highlight_model_combo.pack(side=tk.LEFT, padx=(10, 5), pady=5)
+        self.highlight_model_combo.bind("<<ComboboxSelected>>", self._on_highlight_option_change)
+        ttk.Label(search_controls_main_frame, text=":مدل هایلایت").pack(side=tk.LEFT, padx=(2, 0), pady=5)
 
         self._on_search_type_change()
         self._toggle_condition_entry()
@@ -125,15 +244,18 @@ class TextAnalyzerApp:
         output_pane = ttk.PanedWindow(main_frame, orient=tk.VERTICAL)
         output_pane.pack(fill=tk.BOTH, expand=True, pady=5)
         results_frame = tk.Frame(output_pane, bg='#cccccc', width=380, height=200)
-        cols = ("نمونه", "کلمه", "فراوانی", "موقعیت")
+
+        cols = ("نمونه", "کلمه", "نقش دستوری", "فراوانی", "موقعیت")
         self.results_tree = ttk.Treeview(results_frame, columns=cols, show='headings', style="Custom.Treeview")
         for col in cols:
             self.results_tree.heading(col, text=col, command=lambda c=col: self._sort_treeview(c, False))
             self.results_tree.column(col, anchor=tk.E)
         self.results_tree.column("نمونه", width=400)
         self.results_tree.column("کلمه", width=150)
+        self.results_tree.column("نقش دستوری", width=120)
         self.results_tree.column("فراوانی", width=100)
         self.results_tree.column("موقعیت", width=100)
+
         self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.results_tree.bind("<<TreeviewSelect>>", self._on_result_click)
         scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.results_tree.yview)
@@ -153,6 +275,8 @@ class TextAnalyzerApp:
         self.source_text.tag_configure("rtl_align", justify='right')
         self.source_text.tag_configure("highlight_found", background="#ADD8E6", relief=tk.RAISED, borderwidth=1)
 
+        # *** FIXED ***: بازگرداندن تعریف متغیر برای نوار وضعیت
+        self.results_count_var = tk.StringVar(value="")
         status_bar_frame = ttk.Frame(self.root, relief=tk.SUNKEN, padding=0)
         status_bar_frame.pack(side=tk.BOTTOM, fill=tk.X)
         self.status_var = tk.StringVar(value="آماده برای بارگذاری داده‌ها...")
@@ -248,11 +372,12 @@ class TextAnalyzerApp:
         selected_item = selected_items[0]
         values = self.results_tree.item(selected_item, "values")
         item_tags = self.results_tree.item(selected_item, "tags")
-        if not values or not values[1] or values[1] == "هیچ نتیجه‌ای یافت نشد.": return
+
+        if not values or len(values) < 5 or values[1] == "هیچ نتیجه‌ای یافت نشد.": return
 
         sample_display_text = values[0]
         term_in_table = values[1]
-        position_type = values[3]
+        position_type = values[4]
 
         self.current_found_word = None
         sources_to_display = []
@@ -266,7 +391,6 @@ class TextAnalyzerApp:
             else:
                 sources_to_display = sorted(list(unique_sources), key=lambda x: (x[1] is None, x[1], x[0]))
         elif 'substring_hit' in item_tags:
-            # For substring hits, the actual found word is in column 1 (کلمه)
             self.current_found_word = term_in_table
             key_for_sources = term_in_table
             unique_sources = set(self.direct_phrase_sources.get(key_for_sources, []))
@@ -288,17 +412,63 @@ class TextAnalyzerApp:
         self.current_source_sentences_for_export = sources_to_display
         self._apply_or_remove_highlights()
 
-    # --- START OF MODIFIED SECTION ---
+    # *** MODIFIED ***: تابع بازچینی برای استفاده از مدل معکوس کامل و تضمین فاصله
+    def _reorder_text_for_bidi_fix(self, text, phrase_to_highlight, model):
+        """
+        بخش‌های متن را بر اساس مدل انتخابی برای مقابله با باگ رندرینگ bidi بازچینی می‌کند.
+        """
+        if not phrase_to_highlight or phrase_to_highlight not in text:
+            return text
+
+        try:
+            parts = re.split(f'({re.escape(phrase_to_highlight)})', text, flags=re.IGNORECASE)
+            text_segments = parts[::2]
+            delimiters = parts[1::2]
+
+            reordered_segments = []
+
+            if model == "مدل ۱ (عادی)":
+                reordered_segments = text_segments
+
+            elif model == "مدل ۲ (معکوس کامل)":
+                reordered_segments = list(reversed(text_segments))
+
+            elif model == "مدل ۳ (جفت آخر عادی)":
+                segments = list(text_segments)
+                if len(segments) >= 2:
+                    last_pair = segments[-2:]
+                    other_segments = segments[:-2]
+                    reordered_segments = last_pair + list(reversed(other_segments))
+                else:
+                    reordered_segments = segments
+
+            elif model == "مدل ۴ (جفت اول عادی)":
+                segments = list(text_segments)
+                if len(segments) >= 2:
+                    first_pair = segments[:2]
+                    other_segments = segments[2:]
+                    reordered_segments = list(reversed(other_segments)) + first_pair
+                else:
+                    reordered_segments = segments
+
+            # بازسازی رشته نهایی با تضمین وجود فاصله در اطراف جداکننده
+            final_text_parts = []
+            for i, segment in enumerate(reordered_segments):
+                final_text_parts.append(segment.strip())
+                if i < len(delimiters):
+                    final_text_parts.append(f" {delimiters[i]} ")
+
+            return "".join(final_text_parts)
+
+        except (re.error, IndexError):
+            return text
+
     def _apply_or_remove_highlights(self):
-        """
-        روش جدید و پایدار برای نمایش جملات منبع.
-        ابتدا تمام محتوا را درج کرده و سپس هایلایت را اعمال می‌کند.
-        این روش از بازچینی پیچیده و مستعد خطای متن (reordering) پرهیز می‌کند.
-        """
         self.source_text.config(state=tk.NORMAL)
         self.source_text.delete(1.0, tk.END)
 
-        # مرحله 1: تمام محتوا (لینک‌ها و جملات) را در ویجت درج کن
+        highlight_model = self.highlight_model_var.get()
+
         for i, (original_sentence, book_path) in enumerate(self.current_source_sentences_for_export):
             if i > 0:
                 self.source_text.insert(tk.END, "\n\n---\n\n", "rtl_align")
@@ -326,12 +496,15 @@ class TextAnalyzerApp:
                 else:
                     self.source_text.insert(tk.END, f"({book_name_ext}) (مسیر فایل در دسترس نیست)\n", "rtl_align")
 
-            # درج خود جمله بدون هیچ بازچینی
-            self.source_text.insert(tk.END, original_sentence, "rtl_align")
+            sentence_to_display = original_sentence
+            if highlight_model != "بدون هایلایت" and self.current_found_word:
+                sentence_to_display = self._reorder_text_for_bidi_fix(original_sentence, self.current_found_word,
+                                                                      highlight_model)
 
-        # مرحله 2: هایلایت را روی کل متن اعمال کن
-        highlight_option = self.highlight_options_var.get()
-        if highlight_option != "بدون هایلایت" and self.current_found_word:
+            self.source_text.insert(tk.END, sentence_to_display, "rtl_align")
+
+        self.source_text.tag_remove("highlight_found", "1.0", tk.END)
+        if highlight_model != "بدون هایلایت":
             self._highlight_text_in_range(
                 text_widget=self.source_text,
                 phrase=self.current_found_word,
@@ -343,6 +516,7 @@ class TextAnalyzerApp:
         self.source_text.config(state=tk.DISABLED)
 
     def _highlight_text_in_range(self, text_widget, phrase, tag, start_range, end_range):
+        if not phrase: return
         current_pos = start_range
         while True:
             pos = text_widget.search(phrase, current_pos, stopindex=end_range, nocase=True, regexp=False, elide=False)
@@ -360,15 +534,12 @@ class TextAnalyzerApp:
                 if next_char.isalnum():
                     is_end_boundary = False
             except tk.TclError:
-                pass  # Reached the end of the text
+                pass
 
             if is_start_boundary and is_end_boundary:
                 text_widget.tag_add(tag, pos, actual_end_idx_highlight)
 
             current_pos = actual_end_idx_highlight
-
-    # تابع _reorder_text_for_highlighting حذف شد
-    # --- END OF MODIFIED SECTION ---
 
     def _open_file(self, file_path: Path):
         try:
@@ -390,7 +561,7 @@ class TextAnalyzerApp:
         if not file_path: return
         try:
             data = []
-            cols = ("نمونه", "کلمه", "فراوانی", "موقعیت")
+            cols = ("نمونه", "کلمه", "نقش دستوری", "فراوانی", "موقعیت")
             for item_id in self.results_tree.get_children():
                 values = self.results_tree.item(item_id, "values")
                 if values and len(values) == len(cols) and values[1] != "هیچ نتیجه‌ای یافت نشد.":
@@ -485,7 +656,7 @@ class TextAnalyzerApp:
     def _process_and_cache_worker(self, root_folder: Path, correction_path: Path | None):
         try:
             self.root.after(0, self._update_status, "در حال خواندن لیست اصلاحات...")
-            correction_dict = text_processing.load_correction_list(correction_path)
+            correction_dict = load_correction_list(correction_path)
             self.root_folder_path = root_folder.resolve()
 
             docx_files = list(self.root_folder_path.rglob('*.docx'))
@@ -498,10 +669,10 @@ class TextAnalyzerApp:
             for i, file_path_obj in enumerate(docx_files):
                 self.root.after(0, self._update_progress, (i / total_files) * 50,
                                 f"پردازش فایل‌ها: {file_path_obj.name}")
-                text_content = text_processing.get_text_from_docx(file_path_obj)
+                text_content = get_text_from_docx(file_path_obj)
                 if text_content:
-                    corrected_text = text_processing.make_corrections_fast(text_content, correction_dict)
-                    processed_segments = text_processing.process_paragraphs(
+                    corrected_text = make_corrections_fast(text_content, correction_dict)
+                    processed_segments = process_paragraphs(
                         corrected_text.split('\n'), self.normalizer, self.MAX_WORDS, self.IDEAL_WORDS
                     )
                     relative_file_path = file_path_obj.relative_to(self.root_folder_path)
@@ -617,15 +788,16 @@ class TextAnalyzerApp:
             for original_sentence, tagged_sentence, book_path_or_name in self.tagged_data:
                 normalized_original_sentence = self.normalizer.normalize(original_sentence)
                 if normalized_user_phrase in normalized_original_sentence:
-                    for word, _ in tagged_sentence:
+                    for word, pos in tagged_sentence:
                         if normalized_user_phrase in self.normalizer.normalize(word):
-                            substring_match_counter[word] += 1
+                            substring_match_counter[(word, pos)] += 1
                             self.direct_phrase_sources[word].append((original_sentence, book_path_or_name))
                             break
 
-            for found_word, count in substring_match_counter.most_common():
+            for (found_word, pos), count in substring_match_counter.most_common():
                 sample_display = f"{found_word} ({user_search_phrase})"
-                direct_phrase_info_list.append((sample_display, found_word, count, "تطابق جزئی"))
+                friendly_pos = self.reverse_pos_map.get(pos, pos)
+                direct_phrase_info_list.append((sample_display, found_word, friendly_pos, count, "تطابق جزئی"))
 
         elif search_type == "کلمات مجاور":
             search_tokens = word_tokenize(self.normalizer.normalize(user_search_phrase))
@@ -650,25 +822,27 @@ class TextAnalyzerApp:
                         if mode in ["هر دو", "کلمه قبلی"] and i > 0:
                             prev_word, prev_pos = tagged_sentence[i - 1]
                             if not has_filters or self._check_filters(prev_word, prev_pos, params):
-                                before_counter[(prev_word, f"{prev_word} {search_phrase_str}")] += 1
+                                before_counter[(prev_word, prev_pos, f"{prev_word} {search_phrase_str}")] += 1
                                 self.sentence_mapping[("قبل", prev_word)].append((original_sentence, book_path_or_name))
                         if mode in ["هر دو", "کلمه بعدی"] and i + phrase_len < len(words):
                             next_word, next_pos = tagged_sentence[i + phrase_len]
                             if not has_filters or self._check_filters(next_word, next_pos, params):
-                                after_counter[(next_word, f"{search_phrase_str} {next_word}")] += 1
+                                after_counter[(next_word, next_pos, f"{search_phrase_str} {next_word}")] += 1
                                 self.sentence_mapping[("بعد", next_word)].append((original_sentence, book_path_or_name))
 
             if exact_match_for_collocation_counter > 0:
                 direct_phrase_info_list.append(
-                    (user_search_phrase, user_search_phrase, exact_match_for_collocation_counter, "عبارت کلیدی"))
+                    (user_search_phrase, user_search_phrase, "-", exact_match_for_collocation_counter, "عبارت کلیدی"))
                 self.direct_phrase_sources[user_search_phrase] = exact_match_sources_for_collocation
 
             if mode in ["هر دو", "کلمه قبلی"]:
-                for (word, sample), count in before_counter.most_common():
-                    collocation_results.append((sample, word, count, "قبل"))
+                for (word, pos, sample), count in before_counter.most_common():
+                    friendly_pos = self.reverse_pos_map.get(pos, pos)
+                    collocation_results.append((sample, word, friendly_pos, count, "قبل"))
             if mode in ["هر دو", "کلمه بعدی"]:
-                for (word, sample), count in after_counter.most_common():
-                    collocation_results.append((sample, word, count, "بعد"))
+                for (word, pos, sample), count in after_counter.most_common():
+                    friendly_pos = self.reverse_pos_map.get(pos, pos)
+                    collocation_results.append((sample, word, friendly_pos, count, "بعد"))
 
         self.root.after(0, self._update_ui_with_results, direct_phrase_info_list, collocation_results)
 
@@ -678,7 +852,7 @@ class TextAnalyzerApp:
 
         if direct_phrase_info_list:
             for item_info in direct_phrase_info_list:
-                tag_to_use = 'direct_hit' if item_info[3] == "عبارت کلیدی" else 'substring_hit'
+                tag_to_use = 'direct_hit' if item_info[4] == "عبارت کلیدی" else 'substring_hit'
                 self.results_tree.insert("", "end", values=item_info, tags=(tag_to_use,))
                 total_results_count += 1
 
@@ -688,7 +862,7 @@ class TextAnalyzerApp:
             total_results_count += len(collocation_results)
 
         if total_results_count == 0:
-            self.results_tree.insert("", "end", values=("", "هیچ نتیجه‌ای یافت نشد.", "", ""))
+            self.results_tree.insert("", "end", values=("", "هیچ نتیجه‌ای یافت نشد.", "", "", ""))
             self.results_count_var.set("نتایج: 0")
         else:
             self.results_count_var.set(f"نتایج: {total_results_count}")
